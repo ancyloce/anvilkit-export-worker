@@ -1,0 +1,11 @@
+version: "2"
+
+linters:
+  default: standard
+
+issues:
+  # Generated contract bindings are linted like everything else — they are
+  # committed source — but exclusions can be added per-path here if a linter
+  # fights the generator.
+  max-issues-per-linter: 0
+  max-same-issues: 0
