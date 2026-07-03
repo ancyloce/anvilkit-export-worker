@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "deploymentId": "dep_01",
+  "siteId": "site_01",
+  "pageId": "page_01",
+  "slug": "home",
+  "version": "v12",
+  "environment": "production",
+  "renderMode": "fetch_route",
+  "artifactBasePath": "sites/site_01/deployments/dep_01",
+  "entry": "/home/index.html",
+  "files": [
+    {
+      "path": "/home/index.html",
+      "storageKey": "sites/site_01/deployments/dep_01/home/index.html",
+      "contentHash": "sha256-xxx",
+      "sizeBytes": 48219,
+      "mimeType": "text/html",
+      "cacheControl": "public, max-age=60, stale-while-revalidate=300"
+    },
+    {
+      "path": "/_assets/component-styles.7a12.css",
+      "storageKey": "sites/site_01/deployments/dep_01/_assets/component-styles.7a12.css",
+      "contentHash": "sha256-yyy",
+      "sizeBytes": 18762,
+      "mimeType": "text/css",
+      "cacheControl": "public, max-age=31536000, immutable"
+    }
+  ],
+  "routes": [
+    {
+      "path": "/home",
+      "entry": "/home/index.html"
+    }
+  ],
+  "createdAt": "2026-06-30T18:01:00Z"
+}
