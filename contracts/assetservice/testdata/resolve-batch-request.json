@@ -1,0 +1,5 @@
+{
+  "teamId": "team_01",
+  "siteId": "site_01",
+  "refs": ["asset://img_01", "asset://font_01"]
+}

@@ -1,0 +1,11 @@
+{
+  "assets": [
+    {
+      "ref": "asset://img_01",
+      "url": "https://assets.example.com/img_01.webp",
+      "mimeType": "image/webp",
+      "sizeBytes": 120000,
+      "contentHash": "sha256-xxx"
+    }
+  ]
+}
