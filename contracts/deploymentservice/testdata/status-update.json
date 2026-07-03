@@ -1,0 +1,6 @@
+{
+  "from": "EXPORT_QUEUED",
+  "to": "EXPORTING",
+  "reason": "worker_started",
+  "traceId": "trace_01"
+}

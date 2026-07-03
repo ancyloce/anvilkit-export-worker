@@ -1,0 +1,14 @@
+{
+  "manifestStorageKey": "sites/site_01/deployments/dep_01/artifact-manifest.json",
+  "artifactBasePath": "sites/site_01/deployments/dep_01",
+  "manifestDigest": "sha256-xxx",
+  "entry": "/home/index.html",
+  "filesCount": 8,
+  "totalBytes": 241022,
+  "routes": [
+    {
+      "path": "/home",
+      "entry": "/home/index.html"
+    }
+  ]
+}

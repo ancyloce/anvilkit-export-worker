@@ -1,0 +1,12 @@
+{
+  "deploymentId": "dep_01",
+  "teamId": "team_01",
+  "siteId": "site_01",
+  "pageId": "page_01",
+  "slug": "home",
+  "version": "v12",
+  "status": "EXPORT_QUEUED",
+  "renderMode": "fetch_route",
+  "targetId": "target_platform_prod",
+  "environment": "production"
+}
