@@ -1,0 +1,87 @@
+# CI (EW-REPO-003 + M2 additions; pipeline stages per PLAN-0001 §10 and
+# ADR-008): lint, vet, unit + integration tests (Redis service container),
+# build, container image build (EW-K8S-001, build-only on PRs — publishing
+# from main/tags joins with the first deployed environment, BD-006), and the
+# dependency-audit gate (EW-REPO-004) with govulncheck.
+#
+# Contract bindings under contracts/ are generated from the platform repo;
+# anvilkit-platform CI regenerates them and fails on drift.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start MinIO (storage/export integration tests)
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data
+      - name: go vet
+        run: go vet ./...
+      - name: Unit + integration tests (race detector; five-mechanism queue
+          suite, lock lifecycle, processor branches — AC-021/026/027/028/033)
+        env:
+          REDIS_TEST_URL: redis://localhost:6379
+          S3_TEST_ENDPOINT: http://localhost:9000
+        run: go test -race -count=1 ./...
+      - name: Build
+        run: go build ./...
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Container image build (EW-K8S-001; build-only on PRs)
+        run: docker build --build-arg VERSION=${{ github.sha }} -t anvilkit-export-worker:${{ github.sha }} .
+      - name: Image smoke test (version + fail-fast boot guard)
+        run: |
+          docker run --rm anvilkit-export-worker:${{ github.sha }} --version
+          if docker run --rm -e ENVIRONMENT=production anvilkit-export-worker:${{ github.sha }}; then
+            echo "misconfigured boot must fail fast (FR-019)"; exit 1
+          fi
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Dependency audit (AC-002, AC-018)
+        run: ./scripts/dependency-audit.sh
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
