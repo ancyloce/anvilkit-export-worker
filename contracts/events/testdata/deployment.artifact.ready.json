@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "eventId": "evt_xxx",
+  "eventType": "deployment.artifact.ready",
+  "deploymentId": "dep_xxx",
+  "teamId": "team_xxx",
+  "siteId": "site_xxx",
+  "pageId": "page_xxx",
+  "slug": "home",
+  "version": "v12",
+  "environment": "production",
+  "renderMode": "fetch_route",
+  "artifactBasePath": "sites/site_xxx/deployments/dep_xxx",
+  "manifestStorageKey": "sites/site_xxx/deployments/dep_xxx/artifact-manifest.json",
+  "manifestDigest": "sha256-xxx",
+  "entry": "/home/index.html",
+  "filesCount": 8,
+  "totalBytes": 241022,
+  "traceId": "trace_xxx",
+  "createdAt": "2026-07-01T13:41:00Z"
+}

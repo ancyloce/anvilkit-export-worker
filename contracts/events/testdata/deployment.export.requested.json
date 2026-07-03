@@ -1,0 +1,16 @@
+{
+  "eventId": "evt_01",
+  "eventType": "deployment.export.requested",
+  "deploymentId": "dep_01",
+  "teamId": "team_01",
+  "siteId": "site_01",
+  "pageId": "page_01",
+  "slug": "home",
+  "version": "v12",
+  "renderMode": "fetch_route",
+  "targetId": "target_platform_prod",
+  "environment": "production",
+  "requestedBy": "user_01",
+  "idempotencyKey": "publish-page_01-v12-target_platform_prod",
+  "createdAt": "2026-06-30T18:00:00Z"
+}

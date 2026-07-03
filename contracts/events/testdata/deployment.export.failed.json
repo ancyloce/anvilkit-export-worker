@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "eventId": "evt_xxx",
+  "eventType": "deployment.export.failed",
+  "deploymentId": "dep_xxx",
+  "teamId": "team_xxx",
+  "siteId": "site_xxx",
+  "pageId": "page_xxx",
+  "slug": "home",
+  "version": "v12",
+  "environment": "production",
+  "renderMode": "fetch_route",
+  "errorCode": "RENDER_ORIGIN_TIMEOUT",
+  "errorClassification": "RETRYABLE",
+  "failedStage": "render_html",
+  "attempt": 3,
+  "retryExhausted": true,
+  "traceId": "trace_xxx",
+  "createdAt": "2026-07-01T13:41:00Z"
+}
