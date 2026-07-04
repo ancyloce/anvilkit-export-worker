@@ -1,0 +1,49 @@
+# CD: immutable image publishing (ADR-008, PLAN-0001 §10). Every main build
+# publishes ghcr.io/ancyloce/anvilkit-export-worker:<git-sha>; release tags
+# additionally publish the semver tag. Tags are never reused or overwritten;
+# PR builds build but never publish (that lives in ci.yml).
+#
+# Environment promotion (dev → staging → production with a manual approval
+# gate into production) is driven from the platform repo's deploy workflow
+# against these immutable tags (EW-K8S-004; activation gated on the first
+# provisioned environment, BD-006).
+name: cd
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Tests must pass before any publish
+        run: go test -count=1 ./...
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build image
+        run: |
+          docker build \
+            --build-arg VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }} \
+            -t ghcr.io/ancyloce/anvilkit-export-worker:${{ github.sha }} .
+      - name: Publish immutable sha tag
+        run: docker push ghcr.io/ancyloce/anvilkit-export-worker:${{ github.sha }}
+      - name: Publish semver tag (releases only)
+        if: github.ref_type == 'tag'
+        run: |
+          docker tag ghcr.io/ancyloce/anvilkit-export-worker:${{ github.sha }} \
+                     ghcr.io/ancyloce/anvilkit-export-worker:${{ github.ref_name }}
+          docker push ghcr.io/ancyloce/anvilkit-export-worker:${{ github.ref_name }}
