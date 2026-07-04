@@ -68,7 +68,7 @@ func NewOpsServer(healthPort, metricsPort int, lc *Lifecycle, g prometheus.Gathe
 			return
 		}
 		w.WriteHeader(http.StatusServiceUnavailable)
-		fmt.Fprintf(w, `{"status":%q}`, stateName(lc.Get()))
+		_, _ = fmt.Fprintf(w, `{"status":%q}`, stateName(lc.Get()))
 	})
 
 	metricsMux := http.NewServeMux()

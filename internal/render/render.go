@@ -156,7 +156,7 @@ func (c *Client) get(ctx context.Context, target, accept string, pin Pin) ([]byt
 		// Connection errors behave like an unavailable origin: retryable.
 		return nil, "", errclass.New(events.ErrorCodeRenderOrigin5xx, stage, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {

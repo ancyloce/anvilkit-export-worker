@@ -75,7 +75,7 @@ func freePort(t *testing.T) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port
 }
 
@@ -94,7 +94,7 @@ func TestSIGTERMDrainsInFlightJob(t *testing.T) {
 	}
 	opts.DB = 5
 	rdb := goredis.NewClient(opts)
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 	if err := rdb.FlushDB(ctx).Err(); err != nil {
 		t.Fatal(err)
 	}

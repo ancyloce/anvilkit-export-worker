@@ -192,7 +192,7 @@ func (s *S3Store) FetchIfExists(ctx context.Context, key string) ([]byte, bool, 
 	if err != nil {
 		return nil, false, classifyStorage(err, "get "+key)
 	}
-	defer obj.Close()
+	defer func() { _ = obj.Close() }()
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(obj); err != nil {
 		var resp minio.ErrorResponse
@@ -210,7 +210,7 @@ func (s *S3Store) Fetch(ctx context.Context, key string) ([]byte, error) {
 	if err != nil {
 		return nil, classifyStorage(err, "get "+key)
 	}
-	defer obj.Close()
+	defer func() { _ = obj.Close() }()
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(obj); err != nil {
 		return nil, classifyStorage(err, "read "+key)
