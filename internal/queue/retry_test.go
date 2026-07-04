@@ -46,7 +46,8 @@ func TestBackoffBounds(t *testing.T) {
 
 func TestBackoffDeterministicWithInjectedRand(t *testing.T) {
 	p := queue.BackoffPolicy{Base: 10 * time.Second, Max: 5 * time.Minute, Rand: func() float64 { return 0.5 }}
-	if p.Delay(1) != p.Delay(1) {
+	first, second := p.Delay(1), p.Delay(1)
+	if first != second {
 		t.Fatal("injected Rand must make Delay deterministic")
 	}
 	if p.Delay(1) != 7500*time.Millisecond {
