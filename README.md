@@ -15,18 +15,26 @@ group, `anvilkit_export_worker_*` metrics. The PRDs' `anvilkit-render-worker` an
 
 ## Status
 
-**Milestone 3 runtime** (PLAN-0001 §5 M3): the full export pipeline is implemented behind
-the `Exporter` seam — version-pinned render fetch with all pinning headers and response
-classification, FR-008 output guards, deterministic dependency harvesting with CSS
-recursion and allowlists, traversal-guarded path mapping, SHA-256-metadata-idempotent
-uploads (multipart > 16 MB, never ETag), the schema-self-validated internal-only manifest,
-pointer submission (BD-004 interim semantics), and CAS-then-emit outcome events validated
-against the frozen contracts. On top of the M2 foundation: five-mechanism queue model,
-distributed lock, CAS flow, fail-fast config with the demo guard.
+**Milestone 4 hardened runtime** (PLAN-0001 §5 M4), on top of the full M3 export pipeline
+and the M2 queue/lock/CAS foundation:
 
-Milestone 4 hardening still to come: full FR-015 idempotent redelivery (manifest-existence
-check + ready-event re-emit), OTel spans, complete metric baseline, SIGTERM drain tests,
-alert rules, failure-injection suite.
+- **FR-015 final:** redelivery after `ARTIFACT_READY` verifies the stored manifest and
+  re-emits the ready event without re-rendering (T-redelivery-idempotency), so a crash
+  between the CAS and the emit self-heals on redelivery.
+- **Full observability:** the complete `anvilkit_export_worker_*` metric baseline
+  (stage durations, artifact bytes/files, auth-failure and unparseable alert feeds),
+  OpenTelemetry spans for every §15.3 stage with trace context propagated to
+  render-origin, and log-field/token-leak assertion tests over real pipeline runs.
+- **Reliability proofs:** failure-injection suites (origin down, deployment-service down,
+  storage down → bounded retries → DLQ + failed event), a multi-worker redelivery storm
+  with zero duplicate active artifacts, and a real-binary SIGTERM test proving the
+  graceful drain (in-flight job completes, ack, lock release, exit 0 — AC-014).
+- **Operability:** Prometheus alert rules for all §15.4 conditions
+  (`anvilkit-platform/infra/alerts/`) and the K8s Deployment probe/drain slice
+  (`anvilkit-platform/infra/k8s/`).
+
+Remaining for M5: cross-repo E2E against the real render-origin (BD-007), load tests,
+CD promotion, runbooks, and the final acceptance sweep.
 
 ## Layout
 
