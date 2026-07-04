@@ -1,7 +1,7 @@
 # Multi-stage build (EW-K8S-001): static Go binary in a minimal, non-root
 # runtime image. Images are tagged immutably in CI (git SHA on main, semver
 # on releases — ADR-008); PR builds build but never publish.
-FROM golang:1.24-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
