@@ -19,5 +19,5 @@ lint:
 audit:
 	./scripts/dependency-audit.sh
 
-# Contract bindings under internal/contracts/ are generated from the platform
+# Contract bindings under contracts/ are generated from the platform
 # repo (anvilkit-platform): bun packages/contracts-codegen/generate.ts
