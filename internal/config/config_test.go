@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // validEnv is a complete, valid configuration base for tests.
@@ -12,7 +13,6 @@ func validEnv() map[string]string {
 		"REDIS_URL":               "redis://redis:6379",
 		"RENDER_ORIGIN_URL":       "http://render-origin:3000",
 		"DEPLOYMENT_SERVICE_URL":  "http://deployment-service:8080",
-		"ASSET_SERVICE_URL":       "http://asset-service:8080",
 		"INTERNAL_SERVICE_TOKEN":  "test-token",
 		"ARTIFACT_STORAGE_DRIVER": "s3",
 		"ARTIFACT_BUCKET":         "anvilkit-artifacts",
@@ -68,7 +68,7 @@ func TestLoadFailFastAggregates(t *testing.T) {
 	}
 	for _, key := range []string{
 		"QUEUE_DRIVER", "RENDER_ORIGIN_URL", "DEPLOYMENT_SERVICE_URL",
-		"ASSET_SERVICE_URL", "INTERNAL_SERVICE_TOKEN", "ARTIFACT_BUCKET",
+		"INTERNAL_SERVICE_TOKEN", "ARTIFACT_BUCKET",
 		"S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY", "ENVIRONMENT",
 	} {
 		if !strings.Contains(msg, key) {
@@ -144,6 +144,90 @@ func TestDryRunGuard(t *testing.T) {
 	}
 	if !c.WorkerDryRun {
 		t.Error("WorkerDryRun not set")
+	}
+}
+
+// TestAssetServiceURLOptional: no worker code path calls asset-service yet,
+// so the variable must not block boot — but a set value must still be a
+// valid absolute URL (fail-fast on typos).
+func TestAssetServiceURLOptional(t *testing.T) {
+	c, err := Load(lookupFrom(validEnv())) // validEnv omits ASSET_SERVICE_URL
+	if err != nil {
+		t.Fatalf("boot without ASSET_SERVICE_URL must succeed: %v", err)
+	}
+	if c.AssetServiceURL != "" {
+		t.Errorf("AssetServiceURL = %q, want empty", c.AssetServiceURL)
+	}
+
+	env := validEnv()
+	env["ASSET_SERVICE_URL"] = "http://asset-service:8080"
+	if c, err = Load(lookupFrom(env)); err != nil || c.AssetServiceURL != "http://asset-service:8080" {
+		t.Fatalf("valid ASSET_SERVICE_URL rejected: %v", err)
+	}
+
+	env["ASSET_SERVICE_URL"] = "asset-service:8080/no-scheme"
+	if _, err = Load(lookupFrom(env)); err == nil || !strings.Contains(err.Error(), "ASSET_SERVICE_URL") {
+		t.Fatalf("relative ASSET_SERVICE_URL must fail fast, got %v", err)
+	}
+}
+
+// TestSizeLimitDefaultsAndValidation covers the M5 same-origin output
+// bounds: safe defaults, fail-fast on zero/negative/garbage.
+func TestSizeLimitDefaultsAndValidation(t *testing.T) {
+	c, err := Load(lookupFrom(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxRenderHTMLBytes != 10<<20 || c.MaxRenderAssetBytes != 25<<20 || c.MaxTotalArtifactBytes != 512<<20 {
+		t.Errorf("size-limit defaults = %d/%d/%d, want 10MiB/25MiB/512MiB",
+			c.MaxRenderHTMLBytes, c.MaxRenderAssetBytes, c.MaxTotalArtifactBytes)
+	}
+	for _, key := range []string{"MAX_RENDER_HTML_BYTES", "MAX_RENDER_ASSET_BYTES", "MAX_TOTAL_ARTIFACT_BYTES"} {
+		for _, bad := range []string{"0", "-1", "ten"} {
+			env := validEnv()
+			env[key] = bad
+			if _, err := Load(lookupFrom(env)); err == nil || !strings.Contains(err.Error(), key) {
+				t.Errorf("%s=%q must fail fast, got %v", key, bad, err)
+			}
+		}
+	}
+	env := validEnv()
+	env["MAX_RENDER_HTML_BYTES"] = "1048576"
+	c, err = Load(lookupFrom(env))
+	if err != nil || c.MaxRenderHTMLBytes != 1<<20 {
+		t.Errorf("explicit MAX_RENDER_HTML_BYTES not applied: %d, %v", c.MaxRenderHTMLBytes, err)
+	}
+}
+
+// TestStreamRetentionDefaultsAndValidation covers the ADR-011 retention
+// config: floor defaults, 0 = disabled accepted, negatives/garbage rejected.
+func TestStreamRetentionDefaultsAndValidation(t *testing.T) {
+	c, err := Load(lookupFrom(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.StreamMainRetention != 72*time.Hour {
+		t.Errorf("StreamMainRetention default = %v, want 72h (ADR-011 production floor)", c.StreamMainRetention)
+	}
+	for name, got := range map[string]time.Duration{
+		"dlq": c.StreamDLQRetention, "ready": c.StreamReadyRetention, "failed": c.StreamFailedRetention,
+	} {
+		if got != 7*24*time.Hour {
+			t.Errorf("%s retention default = %v, want 168h", name, got)
+		}
+	}
+
+	env := validEnv()
+	env["STREAM_MAIN_RETENTION_MS"] = "0"
+	if c, err = Load(lookupFrom(env)); err != nil || c.StreamMainRetention != 0 {
+		t.Errorf("STREAM_MAIN_RETENTION_MS=0 (disabled) must load: %v, %v", c.StreamMainRetention, err)
+	}
+	for _, bad := range []string{"-1", "week"} {
+		env := validEnv()
+		env["STREAM_DLQ_RETENTION_MS"] = bad
+		if _, err := Load(lookupFrom(env)); err == nil || !strings.Contains(err.Error(), "STREAM_DLQ_RETENTION_MS") {
+			t.Errorf("STREAM_DLQ_RETENTION_MS=%q must fail fast, got %v", bad, err)
+		}
 	}
 }
 

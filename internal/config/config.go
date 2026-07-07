@@ -49,7 +49,7 @@ type Config struct {
 	UploadTimeout     time.Duration // UPLOAD_TIMEOUT_MS, default 60000 (Recommended Approach: upload budget backing ARTIFACT_UPLOAD_TIMEOUT and the lock TTL formula)
 
 	DeploymentServiceURL string // DEPLOYMENT_SERVICE_URL, required
-	AssetServiceURL      string // ASSET_SERVICE_URL, required
+	AssetServiceURL      string // ASSET_SERVICE_URL, optional — reserved for the asset-service integration; no worker call path consumes it yet (asset resolution is owned upstream, PRD 0008 §13.7)
 	InternalServiceToken string // INTERNAL_SERVICE_TOKEN, required — SECRET, never logged
 
 	ArtifactStorageDriver string // ARTIFACT_STORAGE_DRIVER, required: s3
@@ -62,6 +62,21 @@ type Config struct {
 
 	DependencyAllowlist    []string // DEPENDENCY_ALLOWLIST, default per §14
 	ExternalAssetAllowlist []string // EXTERNAL_ASSET_ALLOWLIST, default empty (deny-by-default)
+
+	// Same-origin render output size limits (M5 hardening). Oversize
+	// classifies non-retryable VALIDATION_FAILED — a broken render/artifact
+	// contract, never retried.
+	MaxRenderHTMLBytes    int64 // MAX_RENDER_HTML_BYTES, default 10 MiB, must be positive
+	MaxRenderAssetBytes   int64 // MAX_RENDER_ASSET_BYTES, default 25 MiB, must be positive
+	MaxTotalArtifactBytes int64 // MAX_TOTAL_ARTIFACT_BYTES, default 512 MiB, must be positive
+
+	// Stream retention (ADR-011 floors; 0 disables trimming for that
+	// stream). The main stream additionally never trims delivered-but-unacked
+	// or undelivered entries, regardless of age.
+	StreamMainRetention   time.Duration // STREAM_MAIN_RETENTION_MS, default 72h (ADR-011 production floor)
+	StreamDLQRetention    time.Duration // STREAM_DLQ_RETENTION_MS, default 7d
+	StreamReadyRetention  time.Duration // STREAM_READY_RETENTION_MS, default 7d
+	StreamFailedRetention time.Duration // STREAM_FAILED_RETENTION_MS, default 7d
 
 	HealthPort   int    // HEALTH_PORT, default 8081 (internal-only)
 	MetricsPort  int    // METRICS_PORT, default 9091 (internal-only)
@@ -137,6 +152,31 @@ func Load(lookup func(string) (string, bool)) (*Config, error) {
 		}
 		return b
 	}
+	bytesVal := func(key string, def int64) int64 {
+		raw := get(key, "")
+		if raw == "" {
+			return def
+		}
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n <= 0 {
+			problems = append(problems, fmt.Sprintf("%s must be a positive integer of bytes, got %q", key, raw))
+			return def
+		}
+		return n
+	}
+	retentionVal := func(key string, def time.Duration) time.Duration {
+		raw := get(key, "")
+		if raw == "" {
+			return def
+		}
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 0 {
+			problems = append(problems, fmt.Sprintf(
+				"%s must be a non-negative integer of milliseconds (0 disables trimming), got %q", key, raw))
+			return def
+		}
+		return time.Duration(n) * time.Millisecond
+	}
 	listVal := func(key string, def []string) []string {
 		raw := get(key, "")
 		if raw == "" {
@@ -162,7 +202,7 @@ func Load(lookup func(string) (string, bool)) (*Config, error) {
 		UploadTimeout:     msVal("UPLOAD_TIMEOUT_MS", 60*time.Second),
 
 		DeploymentServiceURL: require("DEPLOYMENT_SERVICE_URL"),
-		AssetServiceURL:      require("ASSET_SERVICE_URL"),
+		AssetServiceURL:      get("ASSET_SERVICE_URL", ""),
 		InternalServiceToken: require("INTERNAL_SERVICE_TOKEN"),
 
 		ArtifactStorageDriver: require("ARTIFACT_STORAGE_DRIVER"),
@@ -175,6 +215,15 @@ func Load(lookup func(string) (string, bool)) (*Config, error) {
 
 		DependencyAllowlist:    listVal("DEPENDENCY_ALLOWLIST", []string{"/_next/static/*", "/assets/*", "/fonts/*", "/component-styles.css"}),
 		ExternalAssetAllowlist: listVal("EXTERNAL_ASSET_ALLOWLIST", nil),
+
+		MaxRenderHTMLBytes:    bytesVal("MAX_RENDER_HTML_BYTES", 10<<20),
+		MaxRenderAssetBytes:   bytesVal("MAX_RENDER_ASSET_BYTES", 25<<20),
+		MaxTotalArtifactBytes: bytesVal("MAX_TOTAL_ARTIFACT_BYTES", 512<<20),
+
+		StreamMainRetention:   retentionVal("STREAM_MAIN_RETENTION_MS", 72*time.Hour),
+		StreamDLQRetention:    retentionVal("STREAM_DLQ_RETENTION_MS", 7*24*time.Hour),
+		StreamReadyRetention:  retentionVal("STREAM_READY_RETENTION_MS", 7*24*time.Hour),
+		StreamFailedRetention: retentionVal("STREAM_FAILED_RETENTION_MS", 7*24*time.Hour),
 
 		HealthPort:   intVal("HEALTH_PORT", 8081),
 		MetricsPort:  intVal("METRICS_PORT", 9091),
@@ -216,6 +265,15 @@ func Load(lookup func(string) (string, bool)) (*Config, error) {
 	if c.RenderOriginURL != "" {
 		if guardErr := demoGuard(c.RenderOriginURL, c.LocalDev()); guardErr != "" {
 			problems = append(problems, guardErr)
+		}
+	}
+
+	// ASSET_SERVICE_URL is optional until a worker code path actually calls
+	// asset-service (none does today — the generated client is contract
+	// groundwork). When set, a typo must still fail fast.
+	if c.AssetServiceURL != "" {
+		if u, err := url.Parse(c.AssetServiceURL); err != nil || u.Scheme == "" || u.Host == "" {
+			problems = append(problems, fmt.Sprintf("ASSET_SERVICE_URL is not a valid absolute URL: %q", c.AssetServiceURL))
 		}
 	}
 
