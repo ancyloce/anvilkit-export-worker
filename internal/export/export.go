@@ -57,6 +57,10 @@ type Pipeline struct {
 	// UploadTimeout is the whole-artifact upload budget
 	// (ARTIFACT_UPLOAD_TIMEOUT on expiry).
 	UploadTimeout time.Duration
+	// MaxTotalArtifactBytes bounds the whole artifact bundle
+	// (MAX_TOTAL_ARTIFACT_BYTES; 0 disables). Oversize is a broken
+	// render/artifact contract — non-retryable VALIDATION_FAILED.
+	MaxTotalArtifactBytes int64
 	// ExternalHTTP fetches allowlisted external assets (no internal
 	// credentials attached); nil disables external mirroring.
 	ExternalHTTP *http.Client
@@ -139,6 +143,13 @@ func (p *Pipeline) Export(ctx context.Context, job *worker.Job) error {
 		})
 		totalBytes += int64(len(f.Body))
 	}
+	if p.MaxTotalArtifactBytes > 0 && totalBytes > p.MaxTotalArtifactBytes {
+		// Whole-bundle output guard: terminal, checked before any upload.
+		// The error carries byte counts only — never body content.
+		return errclass.New(events.ErrorCodeValidationFailed, events.FailedStageUploadArtifacts,
+			fmt.Errorf("artifact totals %d bytes across %d files, exceeding MAX_TOTAL_ARTIFACT_BYTES (%d-byte limit)",
+				totalBytes, len(files), p.MaxTotalArtifactBytes))
+	}
 	uploadCtx := ctx
 	var uploadCancel context.CancelFunc
 	if p.UploadTimeout > 0 {
@@ -204,36 +215,18 @@ func (p *Pipeline) Export(ctx context.Context, job *worker.Job) error {
 	job.Log.Info("artifact pointer submitted", "stage", string(events.FailedStageSubmitArtifact))
 
 	// update_status_ready: CAS EXPORTING → ARTIFACT_READY (FR-006).
-	readyCtx, readySpan := obs.StartSpan(ctx, "update_status_ready")
-	err = p.Deploy.Transition(readyCtx, rec.DeploymentID,
-		deploymentservice.DeploymentStatusExporting,
-		deploymentservice.DeploymentStatusArtifactReady,
-		"artifact_ready", job.TraceID, events.FailedStageUpdateStatusReady)
-	obs.EndSpan(readySpan, nil)
-	if conflict, ok := deployment.AsStatusConflict(err); ok {
-		if conflict.CurrentStatus == deploymentservice.DeploymentStatusArtifactReady {
-			// A previous run of this deployment CASed READY and crashed
-			// before emitting: fall through and (re-)emit — consumers are
-			// duplicate-tolerant by deploymentId (ADR-005).
-			job.Log.Warn("deployment already ARTIFACT_READY; re-emitting ready event",
-				"stage", string(events.FailedStageUpdateStatusReady))
-		} else if deployment.NonActionable(conflict.CurrentStatus) {
-			// e.g. CANCELLED mid-flight: stop quietly, no ready event.
-			job.Log.Warn("deployment became non-actionable mid-export; skipping ready event",
-				"stage", string(events.FailedStageUpdateStatusReady),
-				"currentStatus", string(conflict.CurrentStatus))
-			return nil
-		} else {
-			return errclass.New(events.ErrorCodeValidationFailed, events.FailedStageUpdateStatusReady,
-				fmt.Errorf("unexpected CAS conflict: deployment moved to %s during export", conflict.CurrentStatus))
-		}
-	} else if err != nil {
+	emitReady, err := p.casReady(ctx, job)
+	if err != nil {
 		return err
+	}
+	if !emitReady {
+		return nil
 	}
 
 	// emit_ready: CAS-then-emit (FR-013). An emission failure is alerted
-	// but does not fail the completed deployment; the FR-015
-	// redelivery-after-READY re-emit hardening lands in M4.
+	// but does not fail the completed deployment: it is ARTIFACT_READY, so
+	// any redelivery or replay of the request event verifies the stored
+	// manifest and re-emits the ready event without re-rendering (FR-015).
 	ready := emit.BuildReady(emit.ReadyInput{
 		Record:             rec,
 		ArtifactBasePath:   basePath,
@@ -249,13 +242,50 @@ func (p *Pipeline) Export(ctx context.Context, job *worker.Job) error {
 	err = p.Emitter.EmitReady(emitCtx, ready)
 	obs.EndSpan(emitSpan, err)
 	if err != nil {
-		job.Log.Error("deployment.artifact.ready emission failed — cdn trigger lost until the M4 re-emit hardening",
+		job.Log.Error("deployment.artifact.ready emission failed — recovered by re-emit on the next redelivery/replay of the request event (FR-015)",
 			"alert", true, "err", err, "stage", string(events.FailedStageEmitReady))
 	} else {
 		job.Log.Info("ready event emitted", "stage", string(events.FailedStageEmitReady),
 			"eventId", ready.EventID, "filesCount", ready.FilesCount, "totalBytes", ready.TotalBytes)
 	}
 	return nil
+}
+
+// casReady runs the update_status_ready stage: CAS EXPORTING →
+// ARTIFACT_READY (FR-006) with the stop-safe 409 branches. It reports
+// whether the ready event should be emitted. The stage span records the
+// actual transition error — a failed or conflicted CAS must never trace as
+// a clean stage, even on branches the pipeline recovers from.
+func (p *Pipeline) casReady(ctx context.Context, job *worker.Job) (emitReady bool, err error) {
+	rec := job.Record
+	readyCtx, readySpan := obs.StartSpan(ctx, "update_status_ready")
+	err = p.Deploy.Transition(readyCtx, rec.DeploymentID,
+		deploymentservice.DeploymentStatusExporting,
+		deploymentservice.DeploymentStatusArtifactReady,
+		"artifact_ready", job.TraceID, events.FailedStageUpdateStatusReady)
+	obs.EndSpan(readySpan, err)
+	conflict, ok := deployment.AsStatusConflict(err)
+	if !ok {
+		return err == nil, err
+	}
+	switch {
+	case conflict.CurrentStatus == deploymentservice.DeploymentStatusArtifactReady:
+		// A previous run of this deployment CASed READY and crashed before
+		// emitting: fall through and (re-)emit — consumers are
+		// duplicate-tolerant by deploymentId (ADR-005).
+		job.Log.Warn("deployment already ARTIFACT_READY; re-emitting ready event",
+			"stage", string(events.FailedStageUpdateStatusReady))
+		return true, nil
+	case deployment.NonActionable(conflict.CurrentStatus):
+		// e.g. CANCELLED mid-flight: stop quietly, no ready event.
+		job.Log.Warn("deployment became non-actionable mid-export; skipping ready event",
+			"stage", string(events.FailedStageUpdateStatusReady),
+			"currentStatus", string(conflict.CurrentStatus))
+		return false, nil
+	default:
+		return false, errclass.New(events.ErrorCodeValidationFailed, events.FailedStageUpdateStatusReady,
+			fmt.Errorf("unexpected CAS conflict: deployment moved to %s during export", conflict.CurrentStatus))
+	}
 }
 
 // ReemitReady implements the FR-015 redelivery path: load the stored
