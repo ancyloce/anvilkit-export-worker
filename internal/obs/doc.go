@@ -1,11 +1,10 @@
 // Package obs owns observability and lifecycle: structured JSON logging with
 // the required job-scoped fields (PRD 0010 §15.1) and secret redaction
-// (EW-CONFIG-005), Prometheus metrics in the anvilkit_export_worker_*
-// namespace (ADR-015; M2 partial baseline), the internal-only
+// (EW-CONFIG-005), the full Prometheus metric baseline in the
+// anvilkit_export_worker_* namespace (ADR-015, EW-OBS-002) including the
+// §15.4 alert feeds, OpenTelemetry per-job spans (§15.3 vocabulary) with
+// trace context forwarded to render-origin (EW-OBS-003), the internal-only
 // health/readiness/metrics endpoints on ports 8081/9091 (FR-018), and the
-// worker lifecycle state reflected by the readiness probe.
-//
-// Still to land in M4 (EW-OBS-002 final, EW-OBS-003, EW-OBS-005..007): the
-// full metric baseline, OpenTelemetry per-job spans with context forwarded
-// to render-origin, SIGTERM graceful-drain hardening, and alert rules.
+// worker lifecycle state reflected by the readiness probe — including the
+// DRAINING state the SIGTERM graceful drain flips through (FR-017).
 package obs

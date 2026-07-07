@@ -26,6 +26,7 @@ type Metrics struct {
 	LockConflictTotal  prometheus.Counter
 	QueuePending       prometheus.Gauge
 	RetryDispatchLagMs prometheus.Gauge
+	StreamTrimmedTotal *prometheus.CounterVec
 }
 
 // NewMetrics registers the M2 metric set plus the standard Go runtime
@@ -100,12 +101,17 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "anvilkit_export_worker_retry_dispatch_lag_ms",
 			Help: "Age of the oldest due, undispatched retry envelope in milliseconds.",
 		}),
+		StreamTrimmedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "anvilkit_export_worker_stream_trimmed_total",
+			Help: "Stream entries removed by retention trimming (ADR-011), by stream.",
+		}, []string{"stream"}),
 	}
 	reg.MustRegister(
 		m.JobsTotal, m.JobsSuccessTotal, m.JobsFailedTotal, m.JobDurationMs,
 		m.RenderDurationMs, m.HarvestDurationMs, m.UploadDurationMs,
 		m.ArtifactBytesTotal, m.ArtifactFilesTotal, m.UnparseableTotal, m.AuthFailuresTotal,
 		m.RetryTotal, m.DLQTotal, m.LockConflictTotal, m.QueuePending, m.RetryDispatchLagMs,
+		m.StreamTrimmedTotal,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
