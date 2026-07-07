@@ -15,26 +15,43 @@ group, `anvilkit_export_worker_*` metrics. The PRDs' `anvilkit-render-worker` an
 
 ## Status
 
-**Milestone 4 hardened runtime** (PLAN-0001 §5 M4), on top of the full M3 export pipeline
-and the M2 queue/lock/CAS foundation:
+**M5 hardening** (PLAN-0002), on top of the executed M1–M5 pipeline (full export
+pipeline, FR-015 redelivery re-emit, five-mechanism queue model, complete
+observability baseline, failure-injection/storm/SIGTERM-drain proofs, §15.4 alert
+rules, K8s slice, CD immutable images):
 
-- **FR-015 final:** redelivery after `ARTIFACT_READY` verifies the stored manifest and
-  re-emits the ready event without re-rendering (T-redelivery-idempotency), so a crash
-  between the CAS and the emit self-heals on redelivery.
-- **Full observability:** the complete `anvilkit_export_worker_*` metric baseline
-  (stage durations, artifact bytes/files, auth-failure and unparseable alert feeds),
-  OpenTelemetry spans for every §15.3 stage with trace context propagated to
-  render-origin, and log-field/token-leak assertion tests over real pipeline runs.
-- **Reliability proofs:** failure-injection suites (origin down, deployment-service down,
-  storage down → bounded retries → DLQ + failed event), a multi-worker redelivery storm
-  with zero duplicate active artifacts, and a real-binary SIGTERM test proving the
-  graceful drain (in-flight job completes, ack, lock release, exit 0 — AC-014).
-- **Operability:** Prometheus alert rules for all §15.4 conditions
-  (`anvilkit-platform/infra/alerts/`) and the K8s Deployment probe/drain slice
-  (`anvilkit-platform/infra/k8s/`).
+- **Same-origin output bounds:** page, per-asset, and whole-bundle byte limits with
+  bounded reads; oversize is non-retryable `VALIDATION_FAILED` (broken render
+  contract), never truncated, never leaking body bytes or credentials.
+- **Stream retention (ADR-011):** the worker trims its four streams to configured
+  floors with `XTRIM MINID`; the main stream never trims delivered-but-unacked or
+  undelivered entries (the ack rule outranks retention). Trim activity:
+  `anvilkit_export_worker_stream_trimmed_total{stream}`.
+- **Trace correctness:** the `update_status_ready` span records the actual CAS
+  outcome, including recovered conflicts.
+- **Schema-subset guard:** embedded contract schemas are audited against the
+  validator's keyword subset, so contract evolution can never silently bypass
+  validation (`internal/jsonschema.Audit`).
 
-Remaining for M5: cross-repo E2E against the real render-origin (BD-007), load tests,
-CD promotion, runbooks, and the final acceptance sweep.
+Remaining before broad rollout is tracked in PRD 0011 (site cap, staging drills, DLQ
+replay tooling, BD-004/005/007 closure, ops sign-offs). Operations live in
+`anvilkit-platform/docs/runbooks/export-worker.md`.
+
+### M5 hardening configuration (extends PRD 0010 §14; all optional)
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MAX_RENDER_HTML_BYTES` | 10 MiB | Max bytes for one rendered page |
+| `MAX_RENDER_ASSET_BYTES` | 25 MiB | Max bytes for one same-origin dependency |
+| `MAX_TOTAL_ARTIFACT_BYTES` | 512 MiB | Max bytes for the whole artifact bundle |
+| `STREAM_MAIN_RETENTION_MS` | 72 h | `deployment.export.requested` retention (0 disables) |
+| `STREAM_DLQ_RETENTION_MS` | 7 d | DLQ retention (0 disables) |
+| `STREAM_READY_RETENTION_MS` | 7 d | `deployment.artifact.ready` retention (0 disables) |
+| `STREAM_FAILED_RETENTION_MS` | 7 d | `deployment.export.failed` retention (0 disables) |
+
+`ASSET_SERVICE_URL` is now **optional** (validated when set): no worker code path
+calls asset-service yet — the generated client is contract groundwork; the variable
+becomes required again in the change that introduces a real call.
 
 ## Layout
 
