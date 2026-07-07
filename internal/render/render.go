@@ -31,11 +31,28 @@ import (
 	"github.com/ancyloce/anvilkit-export-worker/internal/errclass"
 )
 
+// Default same-origin size limits (§14 MAX_RENDER_HTML_BYTES /
+// MAX_RENDER_ASSET_BYTES defaults). Render output beyond the configured
+// bound is a broken render contract — non-retryable VALIDATION_FAILED,
+// mirroring the external-mirror limit's classification.
+const (
+	DefaultMaxHTMLBytes  = 10 << 20 // 10 MiB per rendered page
+	DefaultMaxAssetBytes = 25 << 20 // 25 MiB per same-origin dependency
+)
+
 // Client fetches version-pinned render output.
 type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+
+	// MaxHTMLBytes / MaxAssetBytes bound one fetched page / same-origin
+	// asset (0 = the package defaults above). Responses are read through a
+	// bounded reader, so an oversized origin response can never exhaust
+	// worker memory; oversize errors carry byte counts only — never body
+	// content or credentials.
+	MaxHTMLBytes  int64
+	MaxAssetBytes int64
 }
 
 // New builds the client. timeout is the RENDER_TIMEOUT_MS budget — expiry
@@ -157,7 +174,8 @@ func (c *Client) get(ctx context.Context, target, accept string, pin Pin) ([]byt
 		return nil, "", errclass.New(events.ErrorCodeRenderOrigin5xx, stage, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	limit, limitVar := c.limitFor(stage)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
 			return nil, "", errclass.New(events.ErrorCodeRenderOriginTimeout, stage, err)
@@ -167,6 +185,12 @@ func (c *Client) get(ctx context.Context, target, accept string, pin Pin) ([]byt
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		if int64(len(body)) > limit {
+			// Same-origin output guard: oversized render output is a broken
+			// render/artifact contract — terminal, never truncated.
+			return nil, "", errclass.New(events.ErrorCodeValidationFailed, stage,
+				fmt.Errorf("render-origin response for %s exceeds %s (%d-byte limit)", target, limitVar, limit))
+		}
 		return body, resp.Header.Get("Content-Type"), nil
 	case resp.StatusCode == http.StatusUnauthorized:
 		return nil, "", errclass.New(events.ErrorCodeRenderOrigin401, stage, statusErr(resp.StatusCode, target))
@@ -182,6 +206,21 @@ func (c *Client) get(ctx context.Context, target, accept string, pin Pin) ([]byt
 		return nil, "", errclass.New(events.ErrorCodeValidationFailed, stage,
 			fmt.Errorf("unexpected render-origin status %d for %s", resp.StatusCode, target))
 	}
+}
+
+// limitFor returns the byte bound and the §14 variable naming it for the
+// given pipeline stage (page fetch vs dependency fetch).
+func (c *Client) limitFor(stage events.FailedStage) (int64, string) {
+	if stage == events.FailedStageHarvestDependencies {
+		if c.MaxAssetBytes > 0 {
+			return c.MaxAssetBytes, "MAX_RENDER_ASSET_BYTES"
+		}
+		return DefaultMaxAssetBytes, "MAX_RENDER_ASSET_BYTES"
+	}
+	if c.MaxHTMLBytes > 0 {
+		return c.MaxHTMLBytes, "MAX_RENDER_HTML_BYTES"
+	}
+	return DefaultMaxHTMLBytes, "MAX_RENDER_HTML_BYTES"
 }
 
 func statusErr(status int, target string) error {
