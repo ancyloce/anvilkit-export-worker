@@ -1,12 +1,14 @@
 // Command export-worker is anvilkit-export-worker: the stateless, queue-driven
 // Go worker that owns the AnvilKit export stage.
 //
-// Milestone 3 runtime: fail-fast config with the demo guard, Redis Streams
+// Hardened runtime: fail-fast config with the demo guard, Redis Streams
 // consumption behind the driver seam, the five-mechanism retry/DLQ model,
-// per-deployment locking, and the full export pipeline — version-pinned
-// render fetch, deterministic dependency harvesting, hashed idempotent
-// uploads, internal-only manifest, pointer submission, CAS ARTIFACT_READY,
-// and CAS-then-emit outcome events.
+// per-deployment locking, the full export pipeline — version-pinned render
+// fetch with same-origin size bounds, deterministic dependency harvesting,
+// hashed idempotent uploads, internal-only manifest, pointer submission,
+// CAS ARTIFACT_READY, CAS-then-emit outcome events, FR-015 redelivery
+// re-emit — plus stream retention trimming (ADR-011) and the SIGTERM
+// graceful drain (FR-017).
 package main
 
 import (
@@ -111,20 +113,24 @@ func run() error {
 	deploy := deployment.New(cfg.DeploymentServiceURL, cfg.InternalServiceToken, 10*time.Second)
 	emitter := &emit.Emitter{Append: driver}
 
-	// The M3 export pipeline (render → harvest → upload → manifest →
+	// The export pipeline (render → harvest → upload → manifest →
 	// submit → CAS ready → emit ready).
+	renderClient := render.New(cfg.RenderOriginURL, cfg.InternalServiceToken, cfg.RenderTimeout)
+	renderClient.MaxHTMLBytes = cfg.MaxRenderHTMLBytes
+	renderClient.MaxAssetBytes = cfg.MaxRenderAssetBytes
 	pipeline := &export.Pipeline{
-		Render:            render.New(cfg.RenderOriginURL, cfg.InternalServiceToken, cfg.RenderTimeout),
-		Deploy:            deploy,
-		Store:             store,
-		Emitter:           emitter,
-		BasePrefix:        cfg.ArtifactBasePrefix,
-		Allow:             harvest.Allowlist(cfg.DependencyAllowlist),
-		External:          harvest.Allowlist(cfg.ExternalAssetAllowlist),
-		UploadConcurrency: 8,
-		UploadTimeout:     cfg.UploadTimeout,
-		ExternalHTTP:      externalHTTPClient(cfg),
-		Metrics:           metrics,
+		Render:                renderClient,
+		Deploy:                deploy,
+		Store:                 store,
+		Emitter:               emitter,
+		BasePrefix:            cfg.ArtifactBasePrefix,
+		Allow:                 harvest.Allowlist(cfg.DependencyAllowlist),
+		External:              harvest.Allowlist(cfg.ExternalAssetAllowlist),
+		UploadConcurrency:     8,
+		UploadTimeout:         cfg.UploadTimeout,
+		MaxTotalArtifactBytes: cfg.MaxTotalArtifactBytes,
+		ExternalHTTP:          externalHTTPClient(cfg),
+		Metrics:               metrics,
 	}
 	var exporter worker.Exporter = pipeline
 	var readyRedeliver worker.ReadyRedeliverer = pipeline
@@ -193,6 +199,59 @@ func run() error {
 		}
 	}()
 
+	// Stream retention trimming (ADR-011): enforce the configured floors on
+	// the four worker-owned streams. The main stream never trims
+	// delivered-but-unacked or undelivered entries (ack rule outranks
+	// retention); trimming is idempotent across a multi-worker fleet.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		type target struct {
+			stream    string
+			retention time.Duration
+			main      bool
+		}
+		targets := []target{
+			{queue.StreamMain, cfg.StreamMainRetention, true},
+			{queue.StreamDLQ, cfg.StreamDLQRetention, false},
+			{queue.StreamArtifactReady, cfg.StreamReadyRetention, false},
+			{queue.StreamExportFailed, cfg.StreamFailedRetention, false},
+		}
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-rootCtx.Done():
+				return
+			case <-ticker.C:
+				for _, tgt := range targets {
+					if tgt.retention <= 0 {
+						continue // trimming disabled for this stream
+					}
+					horizon := time.Now().Add(-tgt.retention)
+					var trimmed int64
+					var err error
+					if tgt.main {
+						trimmed, err = driver.TrimMain(rootCtx, horizon)
+					} else {
+						trimmed, err = driver.TrimStream(rootCtx, tgt.stream, horizon)
+					}
+					if err != nil {
+						if rootCtx.Err() == nil {
+							logger.Error("stream retention trim failed", "stream", tgt.stream, "err", err)
+						}
+						continue
+					}
+					if trimmed > 0 {
+						metrics.StreamTrimmedTotal.WithLabelValues(tgt.stream).Add(float64(trimmed))
+						logger.Info("stream retention trim", "stream", tgt.stream,
+							"trimmed", trimmed, "retentionMs", tgt.retention.Milliseconds())
+					}
+				}
+			}
+		}
+	}()
+
 	// Queue-pending gauge.
 	wg.Add(1)
 	go func() {
@@ -254,8 +313,9 @@ func run() error {
 	case <-rootCtx.Done():
 	}
 
-	// Graceful drain (FR-017 skeleton; hardening lands in M4): stop
-	// consuming, finish in-flight jobs, flip readiness, exit cleanly.
+	// Graceful drain (FR-017): stop consuming, finish in-flight jobs, flip
+	// readiness, exit cleanly — proven by the real-binary SIGTERM test
+	// (AC-014); deploys rely on it.
 	lifecycle.Set(obs.StateDraining)
 	logger.Info("SIGTERM received; draining")
 	wg.Wait()
