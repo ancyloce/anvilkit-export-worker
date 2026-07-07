@@ -1,8 +1,8 @@
-// Package worker wires the M2 job pipeline (PRD 0010 §5.1 through the
-// EXPORTING transition): consume → validate → load record → reconcile →
-// lock → CAS EXPORT_QUEUED→EXPORTING → Exporter seam (render/harvest/upload
-// land in M3). It owns every ack decision under the ADR-003 ack rule and the
-// retry / DLQ / terminal-failure branches (FR-014).
+// Package worker wires the job pipeline (PRD 0010 §5.1): consume →
+// validate → load record → reconcile → lock → CAS EXPORT_QUEUED→EXPORTING →
+// Exporter seam (render/harvest/upload/manifest/emit live in
+// internal/export). It owns every ack decision under the ADR-003 ack rule
+// and the retry / DLQ / terminal-failure branches (FR-014).
 package worker
 
 import (
@@ -213,7 +213,7 @@ func (p *Processor) Handle(ctx context.Context, msg queue.Message) Outcome {
 	}()
 
 	if p.d.DryRun {
-		log.Info("dry-run complete: validated, reconciled, locked — export pipeline lands in M3 (no status writes)",
+		log.Info("dry-run complete: validated, reconciled, locked — no status writes, exporter not invoked (local scaffold mode)",
 			"stage", string(events.FailedStageAcquireLock), "status", string(rec.Status))
 		p.ack(ctx, msg, log)
 		return OutcomeDryRun
@@ -253,8 +253,8 @@ func (p *Processor) Handle(ctx context.Context, msg queue.Message) Outcome {
 			"status", string(deploymentservice.DeploymentStatusExporting))
 	}
 
-	// Export seam (M3: render → harvest → upload → manifest → submit →
-	// CAS ARTIFACT_READY → emit ready).
+	// Export seam: render → harvest → upload → manifest → submit →
+	// CAS ARTIFACT_READY → emit ready (internal/export).
 	if err := p.d.Exporter.Export(jobCtx, &Job{Event: ev, Record: rec, Msg: msg, TraceID: traceID, Log: log}); err != nil {
 		return p.fail(ctx, msg, ev, ev.DeploymentID, rec, traceID,
 			errclass.From(err, events.FailedStageRenderHtml), log, start)
