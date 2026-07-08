@@ -418,6 +418,52 @@ func TestExhaustionAtAttemptThree(t *testing.T) {
 	}
 }
 
+// M2: a TRANSIENT terminal-CAS failure at exhaustion must leave the message
+// pending (so reclaim retries the CAS) and must NOT write the DLQ or ack — a
+// deployment-service outage on the final attempt cannot strand the record
+// non-terminal while the message is consumed. rec starts EXPORTING so the only
+// transition is the exhaustion EXPORT_FAILED CAS.
+func TestExhaustionTransientCASFailureLeavesPending(t *testing.T) {
+	h := newHarness(t)
+	h.deploy.rec.Status = deploymentservice.DeploymentStatusExporting
+	h.deploy.transitionErr = errclass.New(events.ErrorCodeDeploymentServiceTimeout,
+		events.FailedStageUpdateStatusExporting, errors.New("deployment-service down"))
+	h.exporter.err = errclass.New(events.ErrorCodeRenderOriginTimeout,
+		events.FailedStageRenderHtml, errors.New("slow origin"))
+	out := h.proc.Handle(context.Background(), msgWith(validPayload(t), 3))
+	if out != worker.OutcomeNoAck {
+		t.Fatalf("outcome = %s (want no_ack)", out)
+	}
+	if len(h.consumer.acked) != 0 {
+		t.Error("a transient terminal-CAS failure at exhaustion must leave the message pending")
+	}
+	if len(h.dlq.entries) != 0 {
+		t.Error("DLQ must not be written until the terminal CAS succeeds (no reclaim duplication)")
+	}
+}
+
+// M2 companion: a PERSISTENT (non-retryable) terminal-CAS failure at exhaustion
+// still preserves DLQ evidence and acks — bounded, never an infinite reclaim
+// loop.
+func TestExhaustionPersistentCASFailureDLQsAndAcks(t *testing.T) {
+	h := newHarness(t)
+	h.deploy.rec.Status = deploymentservice.DeploymentStatusExporting
+	h.deploy.transitionErr = errclass.New(events.ErrorCodeValidationFailed,
+		events.FailedStageUpdateStatusExporting, errors.New("permanent CAS reject"))
+	h.exporter.err = errclass.New(events.ErrorCodeRenderOriginTimeout,
+		events.FailedStageRenderHtml, errors.New("slow origin"))
+	out := h.proc.Handle(context.Background(), msgWith(validPayload(t), 3))
+	if out != worker.OutcomeDLQ {
+		t.Fatalf("outcome = %s (want dlq)", out)
+	}
+	if len(h.dlq.entries) != 1 {
+		t.Error("persistent CAS failure at exhaustion must still preserve DLQ evidence")
+	}
+	if len(h.consumer.acked) != 1 {
+		t.Error("persistent CAS failure at exhaustion must ack (bounded, no infinite reclaim)")
+	}
+}
+
 // AC-027 at the processor level: crash-before-ack (simulated by a failing
 // Ack) followed by redelivery produces ONE envelope, not two.
 func TestEnvelopeIdempotentAcrossCrashBeforeAck(t *testing.T) {

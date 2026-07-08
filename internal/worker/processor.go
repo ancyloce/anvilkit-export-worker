@@ -414,9 +414,20 @@ func (p *Processor) exhausted(ctx context.Context, msg queue.Message, ev *events
 	rec *deploymentservice.DeploymentRecord, traceID string, ce *errclass.Error, log *slog.Logger) Outcome {
 
 	if casErr := p.casFailed(ctx, deploymentID, rec, traceID, ce, log); casErr != nil {
-		// Best effort at exhaustion: four executions already burned on a
-		// retryable error; the DLQ entry is the bounded evidence trail.
-		log.Error("exhaustion CAS EXPORT_FAILED failed; continuing to DLQ", "err", casErr, "alert", true)
+		if errclass.From(casErr, ce.Stage).Retryable() {
+			// Transient CAS failure at exhaustion (e.g. deployment-service
+			// down): leave the message pending so pending recovery retries the
+			// terminal CAS rather than acking a deployment that never reached
+			// EXPORT_FAILED. The DLQ entry is not written yet, so reclaim does
+			// not duplicate it (mirrors the fail() terminal-CAS branch).
+			log.Error("exhaustion CAS EXPORT_FAILED failed transiently; leaving message pending",
+				"err", casErr, "alert", true)
+			return OutcomeNoAck
+		}
+		// Persistent CAS failure: fall through to DLQ + ack — bounded evidence,
+		// never an infinite reclaim loop.
+		log.Error("exhaustion CAS EXPORT_FAILED failed persistently; continuing to DLQ",
+			"err", casErr, "alert", true)
 	}
 	if err := p.d.DLQ.SendToDLQ(ctx, p.dlqEntry(msg, ce)); err != nil {
 		log.Error("DLQ handoff failed at exhaustion; leaving message pending", "err", err)
