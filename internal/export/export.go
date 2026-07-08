@@ -106,6 +106,7 @@ func (p *Pipeline) Export(ctx context.Context, job *worker.Job) error {
 		FetchExternal: p.externalFetcher(),
 		Allow:         p.Allow,
 		External:      p.External,
+		MaxTotalBytes: p.MaxTotalArtifactBytes,
 		Log:           job.Log,
 	}
 	harvestCtx, harvestSpan := obs.StartSpan(ctx, "harvest_dependencies")
@@ -178,12 +179,13 @@ func (p *Pipeline) Export(ctx context.Context, job *worker.Job) error {
 
 	// write_manifest: build, self-validate, upload internal-only (FR-012).
 	manifestCtx, manifestSpan := obs.StartSpan(ctx, "write_manifest")
-	manifest, encoded, digest, err := storage.BuildManifest(rec, basePath, entry, route, manifestFiles, now())
+	manifestKey := basePath + "/" + storage.ManifestFilename
+	createdAt := p.manifestCreatedAt(manifestCtx, job.Event.CreatedAt, manifestKey, now())
+	manifest, encoded, digest, err := storage.BuildManifest(rec, basePath, entry, route, manifestFiles, createdAt)
 	if err != nil {
 		obs.EndSpan(manifestSpan, err)
 		return err
 	}
-	manifestKey := basePath + "/" + storage.ManifestFilename
 	if _, err := p.Store.EnsureUploaded(manifestCtx, storage.Object{
 		Key: manifestKey, Body: encoded, ContentType: "application/json",
 		CacheControl: storage.CacheControlManifest, SHA256Hex: storage.SHA256Hex(encoded),
@@ -255,6 +257,26 @@ func (p *Pipeline) Export(ctx context.Context, job *worker.Job) error {
 	job.Log.Info("ready event emitted", "stage", string(events.FailedStageEmitReady),
 		"eventId", ready.EventID, "filesCount", ready.FilesCount, "totalBytes", ready.TotalBytes)
 	return nil
+}
+
+// manifestCreatedAt returns a deterministic createdAt for the manifest so that
+// re-runs of the same deployment build byte-identical manifests (and therefore
+// a stable digest — the pointer's content-addressed proof; a wall-clock value
+// would drift the digest on every crash-retry). Precedence: the request
+// event's emit time (immutable, re-injected verbatim on every retry), then a
+// previously-stored manifest's createdAt (deployment-service treats the stored
+// manifest as canonical), and only on a true first write the fresh clock.
+func (p *Pipeline) manifestCreatedAt(ctx context.Context, eventCreatedAt, manifestKey string, fresh time.Time) string {
+	if eventCreatedAt != "" {
+		return eventCreatedAt
+	}
+	if data, found, err := p.Store.FetchIfExists(ctx, manifestKey); err == nil && found {
+		var prior artifact.Manifest
+		if json.Unmarshal(data, &prior) == nil && prior.CreatedAt != "" {
+			return prior.CreatedAt
+		}
+	}
+	return fresh.UTC().Format(time.RFC3339)
 }
 
 // casReady runs the update_status_ready stage: CAS EXPORTING →
