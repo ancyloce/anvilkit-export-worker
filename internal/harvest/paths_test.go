@@ -89,15 +89,40 @@ func TestNormalizePathTraversalCorpus(t *testing.T) {
 }
 
 // TestStorageKeyConfinement: every key stays under the deployment prefix.
+// Traversal is a dot SEGMENT, not a `..` substring — segment names containing
+// dots (Next.js catch-all chunk directories like `[...slug]`) are legitimate.
 func TestStorageKeyConfinement(t *testing.T) {
 	base := "sites/site_01/deployments/dep_01"
-	key, err := StorageKey(base, "/home/index.html")
-	if err != nil || key != "sites/site_01/deployments/dep_01/home/index.html" {
-		t.Fatalf("StorageKey = (%q, %v)", key, err)
+	valid := []string{
+		"/home/index.html",
+		"/_next/static/chunks/app/[...slug]/page.js",
+		"/assets/lib..min.js",
 	}
-	for _, hostile := range []string{"../escape", "/..", "/a/../.."} {
-		if _, err := StorageKey(base, hostile); err == nil {
-			t.Errorf("StorageKey(%q) must reject prefix escape", hostile)
+	for _, p := range valid {
+		key, err := StorageKey(base, p)
+		if err != nil || key != base+p {
+			t.Errorf("StorageKey(%q) = (%q, %v), want %q", p, key, err, base+p)
+		}
+	}
+	hostile := []string{
+		"../escape",
+		"/..",
+		"/a/../..",
+		"/a/../b",
+		"/a/./b",
+		"/a//b",
+		"/a/",
+		`/a\..\b`,
+		"relative/path",
+	}
+	for _, p := range hostile {
+		_, err := StorageKey(base, p)
+		var ce *errclass.Error
+		if !errors.As(err, &ce) || ce.Code != events.ErrorCodePathTraversalDetected {
+			t.Errorf("StorageKey(%q): err = %v, want PATH_TRAVERSAL_DETECTED", p, err)
+		}
+		if ce != nil && ce.Retryable() {
+			t.Errorf("StorageKey(%q) must be non-retryable", p)
 		}
 	}
 }

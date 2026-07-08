@@ -91,11 +91,23 @@ func NormalizePath(raw string) (string, error) {
 
 // StorageKey joins the deployment base path with an artifact-relative path,
 // asserting confinement (FR-010: every key stays under
-// sites/{siteId}/deployments/{deploymentId}/).
+// sites/{siteId}/deployments/{deploymentId}/). Dot segments are matched per
+// segment, mirroring NormalizePath: `..` inside a segment name is a
+// legitimate name, not traversal — Next.js catch-all chunk directories
+// (`/_next/static/chunks/app/[...slug]/page.js`) contain one.
 func StorageKey(basePath, artifactPath string) (string, error) {
-	if !strings.HasPrefix(artifactPath, "/") || strings.Contains(artifactPath, "..") {
+	violation := func() (string, error) {
 		return "", errclass.New(events.ErrorCodePathTraversalDetected, events.FailedStageUploadArtifacts,
 			fmt.Errorf("artifact path %q escapes the deployment prefix", artifactPath))
+	}
+	if !strings.HasPrefix(artifactPath, "/") || strings.Contains(artifactPath, `\`) {
+		return violation()
+	}
+	for _, seg := range strings.Split(strings.TrimPrefix(artifactPath, "/"), "/") {
+		switch seg {
+		case "", ".", "..":
+			return violation()
+		}
 	}
 	return basePath + artifactPath, nil
 }
