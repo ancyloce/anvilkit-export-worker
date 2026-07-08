@@ -25,9 +25,22 @@ type Job struct {
 // manifest → pointer submission → CAS ARTIFACT_READY → emit ready
 // (EW-RENDER-*, EW-ARTIFACT-*, EW-STORAGE-*, EW-EVENT-*). Returning nil
 // means the deployment reached ARTIFACT_READY and the message may be acked.
+// An error wrapping ErrReadyEmitPending means the deployment is durably
+// ARTIFACT_READY but the ready-event emission failed: the processor must
+// leave the message pending, never ack.
 type Exporter interface {
 	Export(ctx context.Context, job *Job) error
 }
+
+// ErrReadyEmitPending signals that the pipeline completed durably — the CAS to
+// ARTIFACT_READY succeeded — but emitting deployment.artifact.ready failed. The
+// processor must leave the message pending (write-then-ack) so pending recovery
+// redelivers it and the FR-015 redelivery path re-emits the ready event from
+// the stored manifest. Acking on a swallowed emit failure would lose the event
+// permanently: an acked Redis Streams message is never redelivered, so the
+// "recovered on redelivery" guarantee only holds while the message stays
+// pending.
+var ErrReadyEmitPending = errors.New("ready event emission failed after ARTIFACT_READY; pending re-emit")
 
 // ErrPipelineUnimplemented marks the M2 scaffold state. main refuses to
 // start a non-dry-run worker while the default exporter is Unimplemented, so

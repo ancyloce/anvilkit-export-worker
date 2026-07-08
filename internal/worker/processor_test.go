@@ -7,6 +7,7 @@ package worker_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -461,8 +462,10 @@ func TestUnparseableDLQHandoffThenAck(t *testing.T) {
 	}
 }
 
-// Schema-invalid but deploymentId extractable: terminal VALIDATION_FAILED
-// without the DLQ (that route is for unparseable input only).
+// Schema-invalid but deploymentId extractable (H2): load the record and
+// resolve it to a terminal EXPORT_FAILED — no DLQ (that route is for
+// unparseable input only) — so the deployment is never stranded in
+// EXPORT_QUEUED with only a log line.
 func TestSchemaInvalidFailsTerminallyWithoutDLQ(t *testing.T) {
 	h := newHarness(t)
 	payload := []byte(`{"deploymentId":"dep_01","eventType":"nope"}`)
@@ -470,11 +473,73 @@ func TestSchemaInvalidFailsTerminallyWithoutDLQ(t *testing.T) {
 	if out != worker.OutcomeFailedTerminal {
 		t.Fatalf("outcome = %s", out)
 	}
+	if h.deploy.loadCalls != 1 {
+		t.Errorf("schema-invalid must load the record to CAS it terminal; loadCalls = %d", h.deploy.loadCalls)
+	}
+	if len(h.deploy.transitions) != 1 ||
+		h.deploy.transitions[0].from != deploymentservice.DeploymentStatusExportQueued ||
+		h.deploy.transitions[0].to != deploymentservice.DeploymentStatusExportFailed ||
+		h.deploy.transitions[0].reason != string(events.ErrorCodeValidationFailed) {
+		t.Errorf("must CAS EXPORT_QUEUED→EXPORT_FAILED (VALIDATION_FAILED): %+v", h.deploy.transitions)
+	}
 	if len(h.dlq.entries) != 0 {
 		t.Error("schema-invalid is not the DLQ route")
 	}
 	if len(h.consumer.acked) != 1 {
 		t.Error("terminal failure must ack")
+	}
+}
+
+// H2 companion: a schema-invalid event whose record can't be loaded is not
+// silently acked away — a transient (retryable) load failure schedules a
+// bounded retry (write-then-ack) so pending recovery re-drives the load+CAS.
+func TestSchemaInvalidLoadFailureSchedulesRetry(t *testing.T) {
+	h := newHarness(t)
+	h.deploy.loadErr = errclass.New(events.ErrorCodeDeploymentServiceTimeout,
+		events.FailedStageLoadDeployment, errors.New("deployment-service down"))
+	payload := []byte(`{"deploymentId":"dep_01","eventType":"nope"}`)
+	out := h.proc.Handle(context.Background(), msgWith(payload, 0))
+	if out != worker.OutcomeRetryScheduled {
+		t.Fatalf("outcome = %s", out)
+	}
+	if len(h.retries.envs) != 1 {
+		t.Fatalf("transient load failure must schedule exactly one retry; envs = %v", h.retries.envs)
+	}
+	for _, env := range h.retries.envs {
+		if env.LastErrorCode != events.ErrorCodeDeploymentServiceTimeout || env.Attempt != 1 {
+			t.Errorf("envelope = %+v", env)
+		}
+	}
+	if len(h.deploy.transitions) != 0 {
+		t.Error("no record loaded — no CAS is possible")
+	}
+	if len(h.consumer.acked) != 1 {
+		t.Error("write-then-ack: the retry envelope was written, so the message acks")
+	}
+}
+
+// H1: a durable ARTIFACT_READY whose ready-event emission failed must NOT be
+// acked. Leaving the message pending lets pending recovery redeliver it so the
+// FR-015 path re-emits from the stored manifest; acking would lose the ready
+// event forever (an acked Streams message is never redelivered).
+func TestReadyEmitFailureLeavesPending(t *testing.T) {
+	h := newHarness(t)
+	h.exporter.err = fmt.Errorf("append refused: %w", worker.ErrReadyEmitPending)
+	out := h.proc.Handle(context.Background(), msgWith(validPayload(t), 0))
+	if out != worker.OutcomeNoAck {
+		t.Fatalf("outcome = %s (want no_ack)", out)
+	}
+	if len(h.consumer.acked) != 0 {
+		t.Error("a lost ready-event emit must never ack the message")
+	}
+	if len(h.retries.envs) != 0 || len(h.dlq.entries) != 0 {
+		t.Error("ready-emit-pending is neither a business retry nor a DLQ case")
+	}
+	if h.exporter.calls != 1 {
+		t.Errorf("exporter must have run once, got %d", h.exporter.calls)
+	}
+	if h.locks.lease == nil || !h.locks.lease.released {
+		t.Error("lock must still be released on the pending path")
 	}
 }
 

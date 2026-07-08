@@ -103,10 +103,23 @@ func (p *Processor) Handle(ctx context.Context, msg queue.Message) Outcome {
 			return p.unparseableToDLQ(ctx, msg, perr)
 		}
 		// Schema-invalid but deploymentId extractable: classified
-		// VALIDATION_FAILED (§13) — terminal-failure branch without a
-		// loaded record.
-		log := p.d.Log.With("deploymentId", extractDeploymentID(msg.Payload), "attempt", msg.Attempt)
-		return p.fail(ctx, msg, nil, extractDeploymentID(msg.Payload), nil, "", errclass.From(perr, events.FailedStageConsumeJob), log, start)
+		// VALIDATION_FAILED (§13). The request event never parsed, but the
+		// deployment record has an id — load it so the failure lands as a
+		// terminal EXPORT_FAILED CAS instead of stranding the record in
+		// EXPORT_QUEUED with only a log line. A load failure is classified
+		// normally (DEPLOYMENT_SERVICE_TIMEOUT → bounded retry → DLQ; 404 →
+		// VALIDATION_FAILED, terminal) rather than silently acked.
+		deploymentID := extractDeploymentID(msg.Payload)
+		log := p.d.Log.With("deploymentId", deploymentID, "attempt", msg.Attempt)
+		loadCtx, loadCancel := context.WithTimeout(ctx, p.d.JobTimeout)
+		rec, lerr := p.d.Deploy.Load(loadCtx, deploymentID)
+		loadCancel()
+		if lerr != nil {
+			return p.fail(ctx, msg, nil, deploymentID, nil, "",
+				errclass.From(lerr, events.FailedStageLoadDeployment), log, start)
+		}
+		return p.fail(ctx, msg, nil, deploymentID, rec, "",
+			errclass.From(perr, events.FailedStageConsumeJob), log, start)
 	}
 
 	traceID := msg.TraceID
@@ -256,6 +269,16 @@ func (p *Processor) Handle(ctx context.Context, msg queue.Message) Outcome {
 	// Export seam: render → harvest → upload → manifest → submit →
 	// CAS ARTIFACT_READY → emit ready (internal/export).
 	if err := p.d.Exporter.Export(jobCtx, &Job{Event: ev, Record: rec, Msg: msg, TraceID: traceID, Log: log}); err != nil {
+		if errors.Is(err, ErrReadyEmitPending) {
+			// The artifact is durably ARTIFACT_READY; only the ready-event
+			// handoff failed. Leave the message pending (write-then-ack):
+			// pending recovery redelivers it and the FR-015 redelivery path
+			// re-emits from the stored manifest. Acking here would lose the
+			// ready event forever.
+			log.Error("ready event emission failed after ARTIFACT_READY; leaving message pending for reclaim-driven re-emit",
+				"stage", string(events.FailedStageEmitReady), "err", err)
+			return OutcomeNoAck
+		}
 		return p.fail(ctx, msg, ev, ev.DeploymentID, rec, traceID,
 			errclass.From(err, events.FailedStageRenderHtml), log, start)
 	}
