@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ancyloce/anvilkit-export-worker/contracts/deploymentservice"
 )
+
+const testCreatedAt = "2026-06-30T18:00:00Z"
 
 // TestCacheControlClasses pins the PRD 0008 §9.3 table and the G-6
 // hash-detection rule (EW-STORAGE-005 DoD).
@@ -58,7 +59,7 @@ func TestBuildManifest(t *testing.T) {
 		},
 	}
 	m, encoded, digest, err := BuildManifest(testRecord(),
-		"sites/site_01/deployments/dep_01", "/home/index.html", "/home", files, time.Now())
+		"sites/site_01/deployments/dep_01", "/home/index.html", "/home", files, testCreatedAt)
 	if err != nil {
 		t.Fatalf("BuildManifest: %v", err)
 	}
@@ -99,8 +100,44 @@ func TestBuildManifestSelfValidation(t *testing.T) {
 	// matches, so break it harder: empty mime violates minLength.
 	files[0].MimeType = ""
 	_, _, _, err := BuildManifest(testRecord(),
-		"sites/site_01/deployments/dep_01", "/home/index.html", "/home", files, time.Now())
+		"sites/site_01/deployments/dep_01", "/home/index.html", "/home", files, testCreatedAt)
 	if err == nil {
 		t.Fatal("schema-invalid manifest must fail self-validation")
+	}
+}
+
+// TestBuildManifestDeterministicDigest (M1): the digest is a pure function of
+// the inputs — including createdAt — with no wall-clock dependency, so re-runs
+// of the same deployment produce an identical manifest and digest.
+func TestBuildManifestDeterministicDigest(t *testing.T) {
+	files := []ManifestFileInput{
+		{
+			Path: "/home/index.html", StorageKey: "sites/site_01/deployments/dep_01/home/index.html",
+			SHA256Hex: strings.Repeat("a", 64), SizeBytes: 100, MimeType: "text/html",
+			CacheControl: CacheControlHTML,
+		},
+	}
+	build := func() (string, []byte) {
+		_, encoded, digest, err := BuildManifest(testRecord(),
+			"sites/site_01/deployments/dep_01", "/home/index.html", "/home", files, testCreatedAt)
+		if err != nil {
+			t.Fatalf("BuildManifest: %v", err)
+		}
+		return digest, encoded
+	}
+	d1, e1 := build()
+	d2, e2 := build()
+	if d1 != d2 || string(e1) != string(e2) {
+		t.Errorf("manifest not deterministic: digest %q vs %q", d1, d2)
+	}
+	// A different createdAt must change the digest (the timestamp is inside the
+	// hashed manifest, so callers must supply a STABLE value — that is the fix).
+	_, _, d3, err := BuildManifest(testRecord(),
+		"sites/site_01/deployments/dep_01", "/home/index.html", "/home", files, "2020-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("BuildManifest: %v", err)
+	}
+	if d3 == d1 {
+		t.Error("digest should incorporate createdAt (confirms determinism must come from a stable input)")
 	}
 }

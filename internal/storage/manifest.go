@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/ancyloce/anvilkit-export-worker/contracts/artifact"
 	"github.com/ancyloce/anvilkit-export-worker/contracts/deploymentservice"
@@ -64,8 +63,13 @@ type ManifestFileInput struct {
 // (FR-012; EW-STORAGE-005). routes[] is always an array — the single-page
 // MVP emits exactly one route. Returns the manifest, its canonical JSON
 // encoding, and its digest.
+//
+// createdAt is supplied by the caller (never read from the wall clock here) so
+// that re-runs of the same deployment produce byte-identical manifests and a
+// stable digest — the digest is the pointer's content-addressed proof, so a
+// non-deterministic manifest would break idempotency on crash-retry.
 func BuildManifest(rec *deploymentservice.DeploymentRecord, basePath, entry, route string,
-	files []ManifestFileInput, now time.Time) (*artifact.Manifest, []byte, string, error) {
+	files []ManifestFileInput, createdAt string) (*artifact.Manifest, []byte, string, error) {
 
 	m := &artifact.Manifest{
 		SchemaVersion:    1,
@@ -80,7 +84,7 @@ func BuildManifest(rec *deploymentservice.DeploymentRecord, basePath, entry, rou
 		Entry:            entry,
 		Files:            make([]artifact.ManifestFile, 0, len(files)),
 		Routes:           []artifact.ManifestRoute{{Path: route, Entry: entry}},
-		CreatedAt:        now.UTC().Format(time.RFC3339),
+		CreatedAt:        createdAt,
 	}
 	for _, f := range files {
 		m.Files = append(m.Files, artifact.ManifestFile{
