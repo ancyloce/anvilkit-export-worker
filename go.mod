@@ -1,6 +1,6 @@
 module github.com/ancyloce/anvilkit-export-worker
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/minio/minio-go/v7 v7.2.1
