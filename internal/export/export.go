@@ -242,12 +242,18 @@ func (p *Pipeline) Export(ctx context.Context, job *worker.Job) error {
 	err = p.Emitter.EmitReady(emitCtx, ready)
 	obs.EndSpan(emitSpan, err)
 	if err != nil {
-		job.Log.Error("deployment.artifact.ready emission failed — recovered by re-emit on the next redelivery/replay of the request event (FR-015)",
+		// The deployment is durably ARTIFACT_READY; only the emit handoff
+		// failed. Signal the processor to leave the message pending so pending
+		// recovery redelivers it and the FR-015 redelivery path re-emits from
+		// the stored manifest — never ack a lost emit (write-then-ack). An
+		// acked Streams message is never redelivered, so acking here would
+		// strand a completed deployment with no ready event.
+		job.Log.Error("deployment.artifact.ready emission failed; leaving message pending for reclaim-driven re-emit (FR-015)",
 			"alert", true, "err", err, "stage", string(events.FailedStageEmitReady))
-	} else {
-		job.Log.Info("ready event emitted", "stage", string(events.FailedStageEmitReady),
-			"eventId", ready.EventID, "filesCount", ready.FilesCount, "totalBytes", ready.TotalBytes)
+		return fmt.Errorf("%w: %v", worker.ErrReadyEmitPending, err)
 	}
+	job.Log.Info("ready event emitted", "stage", string(events.FailedStageEmitReady),
+		"eventId", ready.EventID, "filesCount", ready.FilesCount, "totalBytes", ready.TotalBytes)
 	return nil
 }
 
