@@ -40,21 +40,53 @@ func (a Allowlist) Allows(p string) bool {
 	return false
 }
 
-// AllowsURL matches external URLs: an entry containing "/" is a URL prefix;
-// otherwise it is a hostname (EXTERNAL_ASSET_ALLOWLIST; deny-by-default).
+// AllowsURL matches external URLs (EXTERNAL_ASSET_ALLOWLIST; deny-by-default).
+// An entry containing "/" is a scheme+host[+path-prefix] rule; a bare entry is
+// a hostname. Matching is EXACT on scheme and host and applies a path-segment
+// boundary, so "https://cdn.example.com/assets" allows "…/assets" and
+// "…/assets/app.js" but never "https://cdn.example.com.evil.com/assets",
+// "https://cdn.example.com@evil.com/assets", "https://cdn.example.com:81/…",
+// or "…/assetsX". URLs carrying userinfo are rejected outright — a mirrored
+// static asset never legitimately embeds credentials, and "user@host" is a
+// classic host-spoofing vector.
 func (a Allowlist) AllowsURL(u *url.URL) bool {
+	if u == nil || u.User != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
 	for _, entry := range a {
-		if strings.Contains(entry, "/") {
-			if strings.HasPrefix(u.String(), entry) {
+		if !strings.Contains(entry, "/") {
+			if host == strings.ToLower(entry) {
 				return true
 			}
 			continue
 		}
-		if u.Hostname() == entry {
+		eu, err := url.Parse(entry)
+		if err != nil || eu.Host == "" {
+			continue
+		}
+		if !strings.EqualFold(u.Scheme, eu.Scheme) ||
+			host != strings.ToLower(eu.Hostname()) || u.Port() != eu.Port() {
+			continue
+		}
+		if pathWithinPrefix(u.EscapedPath(), eu.EscapedPath()) {
 			return true
 		}
 	}
 	return false
+}
+
+// pathWithinPrefix reports whether p is within the allowlisted path prefix at a
+// path-segment boundary. The path is dot-segment-normalized first so a
+// traversal like "/assets/../secret" cannot ride an "/assets" prefix. An empty
+// or "/" prefix matches the whole host.
+func pathWithinPrefix(p, prefix string) bool {
+	p = path.Clean("/" + strings.TrimPrefix(p, "/"))
+	prefix = strings.TrimSuffix(path.Clean("/"+strings.TrimPrefix(prefix, "/")), "/")
+	if prefix == "" || prefix == "/" {
+		return true
+	}
+	return p == prefix || strings.HasPrefix(p, prefix+"/")
 }
 
 // File is one harvested artifact file.
@@ -78,7 +110,14 @@ type Harvester struct {
 	// External is the EXTERNAL_ASSET_ALLOWLIST (deny-by-default).
 	External         Allowlist
 	MaxExternalBytes int64
-	Log              *slog.Logger
+	// MaxTotalBytes bounds the cumulative size of the page plus every harvested
+	// dependency body (MAX_TOTAL_ARTIFACT_BYTES; 0 disables). It is enforced
+	// DURING the walk so a page referencing many individually-legal assets
+	// cannot buffer the whole bundle in memory and OOM the worker before the
+	// post-harvest total check runs. Exceeding it aborts the walk with a
+	// non-retryable VALIDATION_FAILED.
+	MaxTotalBytes int64
+	Log           *slog.Logger
 }
 
 type ref struct {
@@ -104,6 +143,19 @@ func (h *Harvester) Run(ctx context.Context, pageHTML []byte) ([]File, error) {
 
 	visited := map[string]bool{}
 	var files []File
+	// Count the page toward the budget so the in-walk guard matches the
+	// whole-bundle limit export.go enforces (the page is prepended there).
+	totalBytes := int64(len(pageHTML))
+	appendFile := func(f File) error {
+		files = append(files, f)
+		totalBytes += int64(len(f.Body))
+		if h.MaxTotalBytes > 0 && totalBytes > h.MaxTotalBytes {
+			return errclass.New(events.ErrorCodeValidationFailed, events.FailedStageHarvestDependencies,
+				fmt.Errorf("harvested bundle exceeds MAX_TOTAL_ARTIFACT_BYTES: %d bytes across %d dependencies plus the page (%d-byte limit)",
+					totalBytes, len(files), h.MaxTotalBytes))
+		}
+		return nil
+	}
 
 	for len(queue) > 0 {
 		current := queue[0]
@@ -131,7 +183,9 @@ func (h *Harvester) Run(ctx context.Context, pageHTML []byte) ([]File, error) {
 			}
 			if file != nil && !visited[file.Path] {
 				visited[file.Path] = true
-				files = append(files, *file)
+				if err := appendFile(*file); err != nil {
+					return nil, err
+				}
 			}
 
 		case strings.HasPrefix(raw, "/"):
@@ -139,7 +193,11 @@ func (h *Harvester) Run(ctx context.Context, pageHTML []byte) ([]File, error) {
 			if err != nil {
 				return nil, err
 			}
-			files = append(files, newFiles...)
+			for _, f := range newFiles {
+				if err := appendFile(f); err != nil {
+					return nil, err
+				}
+			}
 			queue = append(queue, newRefs...)
 
 		default:

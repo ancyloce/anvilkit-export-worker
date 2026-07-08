@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"testing"
 
 	"github.com/ancyloce/anvilkit-export-worker/contracts/events"
@@ -189,5 +190,83 @@ func TestAllowlistSemantics(t *testing.T) {
 		if a.Allows(p) != want {
 			t.Errorf("Allows(%q) = %v, want %v", p, !want, want)
 		}
+	}
+}
+
+// TestAllowsURLAnchoring pins the external-allowlist matching (H3): exact
+// scheme+host with a path-segment boundary, and rejection of host-spoofing
+// (suffix, userinfo), scheme/port drift, and path traversal.
+func TestAllowsURLAnchoring(t *testing.T) {
+	a := harvest.Allowlist{"cdn.example.com", "https://assets.example.com/static"}
+	cases := map[string]bool{
+		// bare-hostname entry: exact host, any scheme.
+		"https://cdn.example.com/pic.png": true,
+		"http://cdn.example.com/pic.png":  true,
+		// host-spoofing must be denied.
+		"https://cdn.example.com.evil.com/pic.png":     false,
+		"https://cdn.example.com@evil.com/pic.png":     false,
+		"https://assets.example.com.evil.com/static/x": false,
+		// url-prefix entry: exact scheme+host + path-segment boundary.
+		"https://assets.example.com/static":         true,
+		"https://assets.example.com/static/app.js":  true,
+		"https://assets.example.com/staticX/app.js": false,
+		"http://assets.example.com/static/app.js":   false, // scheme drift
+		"https://assets.example.com:8443/static/x":  false, // port drift
+		"https://assets.example.com/static/../etc":  false, // traversal
+		"https://other.example.com/static/app.js":   false, // different host
+	}
+	for raw, want := range cases {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		if got := a.AllowsURL(u); got != want {
+			t.Errorf("AllowsURL(%q) = %v, want %v", raw, got, want)
+		}
+	}
+}
+
+// TestHarvestBundleByteBudgetAbortsWalk pins H4: the cumulative byte budget
+// (page + dependencies) is enforced DURING the walk, aborting before the whole
+// bundle is buffered, classified VALIDATION_FAILED at harvest_dependencies.
+func TestHarvestBundleByteBudgetAbortsWalk(t *testing.T) {
+	o := origin{
+		"/assets/a.bin": {MimeType: "application/octet-stream", Body: make([]byte, 100)},
+		"/assets/b.bin": {MimeType: "application/octet-stream", Body: make([]byte, 100)},
+		"/assets/c.bin": {MimeType: "application/octet-stream", Body: make([]byte, 100)},
+	}
+	fetched := 0
+	h := &harvest.Harvester{
+		Fetch: func(ctx context.Context, p string) (*render.Asset, error) {
+			fetched++
+			return o.fetch(ctx, p)
+		},
+		Allow:         harvest.Allowlist{"/assets/*"},
+		MaxTotalBytes: 150, // page + one 100-byte asset already exceeds
+		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	html := []byte(`<img src="/assets/a.bin"><img src="/assets/b.bin"><img src="/assets/c.bin">`)
+
+	_, err := h.Run(context.Background(), html)
+	var ce *errclass.Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("oversized bundle must fail, got %v", err)
+	}
+	if ce.Code != events.ErrorCodeValidationFailed || ce.Stage != events.FailedStageHarvestDependencies {
+		t.Errorf("classified %s at %s, want VALIDATION_FAILED at harvest_dependencies", ce.Code, ce.Stage)
+	}
+	if fetched >= 3 {
+		t.Errorf("walk fetched %d assets; must abort before buffering the whole bundle", fetched)
+	}
+
+	// Within budget: all three mirror without error.
+	fetched = 0
+	h.MaxTotalBytes = 100000
+	files, err := h.Run(context.Background(), html)
+	if err != nil {
+		t.Fatalf("within budget: %v", err)
+	}
+	if len(files) != 3 || fetched != 3 {
+		t.Errorf("files=%d fetched=%d, want 3/3", len(files), fetched)
 	}
 }
