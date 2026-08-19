@@ -149,6 +149,10 @@ func testJob() *worker.Job {
 		TargetID: "target_platform_prod", Environment: "production",
 	}
 	return &worker.Job{
+		Event: &events.ExportRequested{
+			EventID: "evt_e2e", EventType: "deployment.export.requested",
+			DeploymentID: "dep_e2e", CreatedAt: "2026-07-08T00:00:00Z",
+		},
 		Record:  rec,
 		TraceID: "0123456789abcdef0123456789abcdef",
 		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
